@@ -1,3 +1,4 @@
+from typing import Any
 import pygame
 from collections import deque
 from functools import cached_property
@@ -47,7 +48,7 @@ class GameStats(pygame.sprite.Sprite):
 
 
 class Character(pygame.sprite.Sprite):
-    def __init__(self,*args, color=(0, 0, 0), width=80, height=80, route=get_path, speed=2, **kwargs):
+    def __init__(self,*args, color=(0, 0, 0), width=80, height=80, pos=(0,0), route=get_path, speed=2, **kwargs):
         super().__init__(*args, **kwargs)
         self.route = route()
         self.speed = speed
@@ -56,13 +57,24 @@ class Character(pygame.sprite.Sprite):
         self.image = pygame.Surface((width, height))
         self.image.fill(color)
         self.rect = self.image.get_rect()
-        (self.rect.x, self.rect.y) = next(self.route)
+        (self.rect.x, self.rect.y) = pos if pos is not None else next(self.route)
         self.destination = next(self.route)
+        self.time0, self.time = time.time(), 1
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        return super().update(*args, **kwargs)
+
 
     def move(self, dx, dy):
         self.rect.x += dx
         self.rect.y += dy
 
+    @property
+    def n_frames(self):
+        # two digits combined with '*.png'
+        frames = self.source.rglob('*_[0-9][0-9].png')
+        return len(list(frames))
+    
     def navigate(self):
         direction_vector = np.array(self.destination) - np.array(self.rect.center)
         norm = np.linalg.norm(direction_vector)
@@ -80,25 +92,51 @@ class Character(pygame.sprite.Sprite):
         self.rect.y += self.speed * direction_vector[1] / norm
 
 
+class Effect(Character):
+    '''
+    animated effect which
+    can be attached to a sprite
+    '''
+    def __init__(self, *args, source = 'assets/effects/fire', follow: Character = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.source = Path(source)
+        self.follow = follow
+        self.counter = 0
+    
+    def update(self):
+        if self.time > 9:
+            self.kill()
+            return
+        self.time = time.time() - self.time0
+        # cycle sprite images
+        self.counter += 1
+        # self.image = pygame.Surface
+        n_frame = self.counter//4%min(self.n_frames, max(1, int(self.time)))
+        self.image = pygame.image.load(f'{self.source}/{self.source.parts[-1]}_{n_frame:02d}.png').convert_alpha()
+        width, height = self.image.get_width(), self.image.get_height()
+        scale = self.width/width
+        self.image = pygame.transform.scale(self.image, (self.image.get_width()*scale, self.image.get_height()*scale))
+        self.rect.x = self.follow.rect.center[0]-self.image.get_width()/2
+        self.rect.y = self.follow.rect.center[1]-self.image.get_height()
+        
+    
+
 class Enemy(Character):
+    WALK = [24, 25, 26, 27, 28, 29, 30, 31]
     def __init__(self, *args, source = 'assets/sprites/golem', **kwargs):
         super().__init__(*args, **kwargs)
         self.source = Path(source)
         self.counter = 0
 
-    @cached_property
-    def n_frames(self):
-        # two digits combined with '*.png'
-        frames = self.source.rglob('*_[0-9][0-9].png')
-        return len(list(frames))
     
     
     # animate sprite
     def update(self):
         # cycle sprite images
         self.counter += 1
-        # self.image = pygame.Surface 
-        self.image = pygame.image.load(f'{self.source}/{self.source.parts[-1]}_{self.counter//4%self.n_frames:02d}.png').convert_alpha()
+        # self.image = pygame.Surface
+        n_frame = self.counter//4%len(self.WALK) + self.WALK[0]
+        self.image = pygame.image.load(f'{self.source}/{self.source.parts[-1]}_{n_frame:02d}.png').convert_alpha()
         width, height = self.image.get_width(), self.image.get_height()
         scale = self.width/width
         self.image = pygame.transform.scale(self.image, (self.image.get_width()*scale, self.image.get_height()*scale))
@@ -122,6 +160,7 @@ class Tower(pygame.sprite.Sprite):
         if game.money < self.UPGRADE_PRICES[min(self.rank,1)]:
             game.stats.log.append(f"not enough money to upgrade tower at {self.pos}")
             return
+        game.money -= self.UPGRADE_PRICES[min(self.rank,2)]
         game.money -= self.UPGRADE_PRICES[self.rank]
         self.rank += 1
 
@@ -157,14 +196,17 @@ class Game:
         self.time = time.time()
 
     def setup(self):
-        self.character = Character(color=(255, 0, 0), width=40, height=40)
-        self.stats = GameStats(self.screen)
-        self.enemies = Enemy()
         self.all_enemies = pygame.sprite.Group()
         self.all_sprites = pygame.sprite.Group()
+
+        self.character = Character(color=(255, 0, 0), width=40, height=40)
+        self.stats = GameStats(self.screen)
+        for offset in range(0,-11,-1):
+            enemy = Enemy(width=200, pos=(offset*100-30, 275))
+            self.all_enemies.add(enemy)
         self.all_sprites.add(self.character)
         self.all_sprites.add(self.stats)
-        self.all_sprites.add(self.enemies)
+        self.all_sprites.add(self.all_enemies)
 
     def draw_background(self):
         # Load and blit the background image
@@ -209,7 +251,14 @@ class Game:
     def run(self):
         run = True
 
+
         while run:
+            if self.time > 2 and not any([isinstance(inst, Effect) for inst in self.all_sprites.__iter__()]) and self.time< 3:
+                for enemy in self.all_enemies:
+                    fire = Effect(width=80, height=80, follow=enemy, source='assets/effects/fire')
+                    self.all_sprites.add(fire)
+
+            
             self.time = time.time() - self.time0
             for event in pygame.event.get():  # Retrieve all pending events
                 if event.type == pygame.QUIT:
@@ -237,7 +286,7 @@ class Game:
             self.draw_background()  # Draw the background in each frame
             self.all_sprites.update()
             # sort all sprites by y position
-            self.all_sprites = pygame.sprite.LayeredUpdates(sorted(self.all_sprites.sprites(), key=lambda sprite: sprite.rect.y))
+            self.all_sprites = pygame.sprite.LayeredUpdates(sorted(self.all_sprites.sprites(), key=lambda sprite: sprite.rect.y+sprite.rect.height))
             self.all_sprites.draw(self.screen)
             pygame.display.flip()
 
