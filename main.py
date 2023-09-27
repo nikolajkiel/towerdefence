@@ -12,11 +12,11 @@ def get_path():
     path generator
     '''
     points = [(-30, 275), (165, 324), (400, 390), (620,230), (775, 175), (880, 220), (935, 325), (907, 405), (1100, 520), (1200, 450), (1250, 400), (1160, 310), (1240, 220), (1350, 250), (1435, 230), (1540, 250), (1620, 220), (1690, 340), (1790, 290), (1840, 300)]
-    while True:
-        for point in points:
-            yield point
-            if 'game' in globals():
-                game.stats.log.append(f"point reached at {point}")
+    # while True:
+    for point in points:
+        yield point
+            # if 'game' in globals():
+            #     game.stats.log.append(f"point reached at {point}")
 
 
 
@@ -24,37 +24,59 @@ class GameStats(pygame.sprite.Sprite):
     '''
     text stats in top right corner
     '''
-    def __init__(self, screen, *args, width=320, height=120, **kwargs):
+    def __init__(self, game, *args, width=480, height=120, **kwargs):
         super().__init__(*args, **kwargs)
         self.image = pygame.Surface((width, height), pygame.SRCALPHA)
-        self.parent_screen = screen
+        self.game = game
         self.rect = self.image.get_rect()
-        self.rect.x = self.parent_screen.get_width() - self.rect.width - 10
+        self.rect.x = self.game.screen.get_width() - self.rect.width - 10
         self.rect.y = 10
         self.log = deque(maxlen=6)
+
+    @cached_property
+    def pngs(self):
+        return [pygame.image.load(f'assets/effects/heart/heart_{n:02d}.png') for n in range(4)]
+
+    @property
+    def life(self):
+        from itertools import takewhile
+        hearts = [self.pngs[3]] * (self.game.health//3)
+        hearts += [self.pngs[self.game.health%3]] if self.game.health%3 else []
+        hearts += [self.pngs[0]] * (10-len(hearts))
+
+
+        for x, heart in zip(range(11,0,-1), hearts):
+            scale = 0.2
+            heart = pygame.transform.scale(heart, (int(heart.get_width()*scale), int(heart.get_height()*scale)))
+            self.image.blit(heart, (x*heart.get_width(), 0))
+        
     
     def update(self, *args, **kwargs):
         font_size = 20
         self.image.fill((0,0,0,0))
         font = pygame.font.Font(None, font_size)
-        stats = [font.render(f"Money: {game.money}", True, (219, 172, 52))] + \
+        Font = pygame.font.Font(None, int(font_size*1.5))
+        stats = [Font.render(f"Money: {game.money}", True, (219, 172, 52))] + \
             [font.render(f"Time: {game.time:.2f}", True, (255, 255, 255))]
         texts = stats + [font.render(f"{log}", True, (255, 255, 255)) for log in self.log]
 
         for i, text in enumerate(texts):
             text_rect = text.get_rect()
+            text_rect.x = self.image.get_width() - text_rect.width
             text_rect.y += font_size * i
             self.image.blit(text, text_rect)
+        self.life
+        # self.image.blit(self.health, (0, 0))
 
 
 class Character(pygame.sprite.Sprite):
-    def __init__(self,*args, color=(0, 0, 0), width=80, height=80, pos=(0,0), route=get_path, speed=2, **kwargs):
+    def __init__(self,*args, color=(0, 0, 0), width=80, height=80, pos=(0,0), route=get_path, speed=4, **kwargs):
         super().__init__(*args, **kwargs)
         self.route = route()
         self.speed = speed
         self.width = width
         self.height = height
-        self.image = pygame.Surface((width, height))
+        self.image = pygame.Surface((width, height), pygame.SRCALPHA)
         self.image.fill(color)
         self.rect = self.image.get_rect()
         (self.rect.x, self.rect.y) = pos if pos is not None else next(self.route)
@@ -75,21 +97,24 @@ class Character(pygame.sprite.Sprite):
         frames = self.source.rglob('*_[0-9][0-9].png')
         return len(list(frames))
     
-    def navigate(self):
+    def navigate(self, debug=[]):
+        if not debug:
+            debug.append(id(self))
+        if id(self) in debug:
+            print(self.rect.x, self.rect.y, self.rect.center)
         direction_vector = np.array(self.destination) - np.array(self.rect.center)
-        norm = np.linalg.norm(direction_vector)
-
         vector_length = (direction_vector[0]**2 + direction_vector[1]**2) ** 0.5
-        if vector_length < 10:
+        norm = direction_vector / vector_length
+        if vector_length <= self.speed:
             try:
                 self.destination = next(self.route)
             except StopIteration:
                 self.kill()
                 game.stats.log.append(f"enemy reached goal at {self.rect.center}")
-                game.money -= 10
+                game.health -= 1
                 return
-        self.rect.x += self.speed * direction_vector[0] / norm
-        self.rect.y += self.speed * direction_vector[1] / norm
+        self.rect.x += int(self.speed * norm[0])
+        self.rect.y += int(self.speed * norm[1])
 
 
 class Effect(Character):
@@ -191,6 +216,7 @@ class Game:
         self.height = height
         self.screen = pygame.display.set_mode((self.width, self.height))
         self.money = money
+        self.health = 30
         self.setup()
         self.time0 = time.time()
         self.time = time.time()
@@ -200,9 +226,9 @@ class Game:
         self.all_sprites = pygame.sprite.Group()
 
         self.character = Character(color=(255, 0, 0), width=40, height=40)
-        self.stats = GameStats(self.screen)
+        self.stats = GameStats(game=self)
         for offset in range(0,-11,-1):
-            enemy = Enemy(width=200, pos=(offset*100-30, 275))
+            enemy = Enemy(width=200, pos=(offset*100-100, 275))
             self.all_enemies.add(enemy)
         self.all_sprites.add(self.character)
         self.all_sprites.add(self.stats)
@@ -211,6 +237,9 @@ class Game:
     def draw_background(self):
         # Load and blit the background image
         self.screen.blit(pygame.image.load(f'assets/levels/level_{self.level:02d}.png'), (0, 0))
+        # show points on path
+        for point in get_path():
+            pygame.draw.circle(self.screen, (255, 0, 0), point, 5)
 
     def move(self, dx, dy):
         self.character.move(dx, dy)
@@ -253,10 +282,10 @@ class Game:
 
 
         while run:
-            if self.time > 2 and not any([isinstance(inst, Effect) for inst in self.all_sprites.__iter__()]) and self.time< 3:
-                for enemy in self.all_enemies:
-                    fire = Effect(width=80, height=80, follow=enemy, source='assets/effects/fire')
-                    self.all_sprites.add(fire)
+            # if self.time > 2 and not any([isinstance(inst, Effect) for inst in self.all_sprites.__iter__()]) and self.time< 3:
+            #     for enemy in self.all_enemies:
+            #         fire = Effect(width=80, height=80, follow=enemy, source='assets/effects/fire')
+            #         self.all_sprites.add(fire)
 
             
             self.time = time.time() - self.time0
@@ -274,6 +303,8 @@ class Game:
                         self.move(0, 10)
                     if event.key == pygame.K_m:
                         self.money += 100
+                    if event.key == pygame.K_h:
+                        self.health += 1 if self.health < 30 else 0
                     if event.key == pygame.K_r and pygame.K_LCTRL:
                         self.cleanup()
                         # game = Game()
