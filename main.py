@@ -1,7 +1,7 @@
 from typing import Any
 import pygame
 from collections import deque
-from functools import cached_property
+from functools import cached_property, lru_cache
 import numpy as np
 from random import randint
 from pathlib import Path
@@ -11,7 +11,7 @@ def get_path():
     '''
     path generator
     '''
-    points = [(-30, 275), (165, 324), (400, 390), (620,230), (775, 175), (880, 220), (935, 325), (907, 405), (1100, 520), (1200, 450), (1250, 400), (1160, 310), (1240, 220), (1350, 250), (1435, 230), (1540, 250), (1620, 220), (1690, 340), (1790, 290), (1840, 300)]
+    points = [(-0, 275), (165, 324), (400, 390), (620,230), (775, 175), (880, 220), (935, 325), (907, 405), (1100, 520), (1200, 450), (1250, 400), (1160, 310), (1240, 220), (1350, 250), (1435, 230), (1540, 250), (1620, 220), (1690, 340), (1790, 290), (1840, 300)]
     # while True:
     for point in points:
         yield point
@@ -70,18 +70,35 @@ class GameStats(pygame.sprite.Sprite):
 
 
 class Character(pygame.sprite.Sprite):
-    def __init__(self,*args, color=(0, 0, 0), width=80, height=80, pos=(0,0), route=get_path, speed=4, **kwargs):
+    def __init__(self,*args, source=(0, 0, 0), width=80, height=80, pos=None, route=get_path, speed=4, **kwargs):
         super().__init__(*args, **kwargs)
-        self.route = route()
+        if isinstance(source, tuple):
+            self.source = source
+            self.image = pygame.Surface((width, height), pygame.SRCALPHA)
+            self.image.fill(self.source)
+        else:
+            self.source = Path(source)
+            self.image = self.get_image_n(0).convert_alpha()
+            scale = self.width/self.image.get_width()
+            print(scale)
+            self.image = pygame.transform.scale(self.image, (self.image.get_width()*scale, self.image.get_height()*scale))
         self.speed = speed
         self.width = width
         self.height = height
-        self.image = pygame.Surface((width, height), pygame.SRCALPHA)
-        self.image.fill(color)
+        self.route = route()
+        
         self.rect = self.image.get_rect()
         (self.rect.x, self.rect.y) = pos if pos is not None else next(self.route)
         self.destination = next(self.route)
         self.time0, self.time = time.time(), 1
+
+    @lru_cache
+    def get_image_n(self, n):
+        return pygame.image.load(f'{self.source}/{self.source.parts[-1]}_{n:02d}.png')
+
+    # @cached_property
+    # def rect(self):
+    #     return self.image.get_rect()
 
     def update(self, *args: Any, **kwargs: Any) -> None:
         return super().update(*args, **kwargs)
@@ -101,7 +118,8 @@ class Character(pygame.sprite.Sprite):
         if not debug:
             debug.append(id(self))
         if id(self) in debug:
-            print(self.rect.x, self.rect.y, self.rect.center)
+            ...
+            # print(self.rect.x, self.rect.y, self.rect.center)
         direction_vector = np.array(self.destination) - np.array(self.rect.center)
         vector_length = (direction_vector[0]**2 + direction_vector[1]**2) ** 0.5
         norm = direction_vector / vector_length
@@ -136,8 +154,8 @@ class Effect(Character):
         # cycle sprite images
         self.counter += 1
         # self.image = pygame.Surface
-        n_frame = self.counter//4%min(self.n_frames, max(1, int(self.time)))
-        self.image = pygame.image.load(f'{self.source}/{self.source.parts[-1]}_{n_frame:02d}.png').convert_alpha()
+        n_frame = self.counter//1%min(self.n_frames, max(1, int(self.time)))
+        self.image = self.get_image_n(n_frame).convert_alpha() # pygame.image.load(f'{self.source}/{self.source.parts[-1]}_{n_frame:02d}.png').convert_alpha()
         width, height = self.image.get_width(), self.image.get_height()
         scale = self.width/width
         self.image = pygame.transform.scale(self.image, (self.image.get_width()*scale, self.image.get_height()*scale))
@@ -174,12 +192,10 @@ class Tower(pygame.sprite.Sprite):
     PRICE = 50
     UPGRADE_PRICES = [50, 100]
     TOWERS = {'brown': [(2,0,18)], 'grey': [(37,2,2,36)], 'red': [(52,40,40,40,24)]}
-    def __init__(self, *args, color=(0, 0, 0), width=30, height=30, pos=(0,0), rank=0, **kwargs):
+    def __init__(self, *args, pos=None, rank=0, **kwargs):
         super().__init__(*args, **kwargs)
-        self.image = pygame.Surface((width, height), pygame.SRCALPHA)
-        self.image.fill(color)
-        self.pos = (pos[0]-pos[0]%20, pos[1]-pos[1]%10 )
         self.rank = rank
+        self.pos = pos
 
     def upgrade(self):
         if game.money < self.UPGRADE_PRICES[min(self.rank,1)]:
@@ -207,6 +223,32 @@ class Tower(pygame.sprite.Sprite):
         self.rect.x = self.pos[0]-self.rect.width/2
         self.rect.y = self.pos[1]-self.rect.height+imgs[0].get_height()/2
 
+class Schedule:
+    type = 42000
+    def __init__(self, func, *args, delay=500, parent=None, **kwargs):
+        self.start_time = time.time()
+        self.delay = delay
+        self.callable = func
+        self.args = args
+        self.kwargs = kwargs
+        self.parent = parent
+    
+    @property
+    def event(self):
+        return pygame.event.Event(self.type, func=self)
+
+    @property
+    def is_ready(self):
+        return (time.time() - self.start_time)*1000 > self.delay
+
+    def __call__(self):
+        if self.is_ready:
+            rv = self.callable(*self.args, **self.kwargs)
+            self.parent.all_enemies.add(rv)
+            self.parent.all_sprites.add(rv)
+        else:
+            pygame.event.post(self.event)
+
 
 
 class Game:
@@ -220,16 +262,27 @@ class Game:
         self.setup()
         self.time0 = time.time()
         self.time = time.time()
+        self.pause = False
+
+    def create_wave(self, n_enemies=12, offset=0):
+        # spawn enemies with a delay
+        for i in range(n_enemies):
+            s = Schedule(Enemy, delay=i*500 + offset, parent=self, source='assets/sprites/golem')
+            e = pygame.event.Event(42000, func=s)
+            pygame.event.post(e)
+            # enemy = Enemy(source='assets/sprites/golem')
+            # self.all_enemies.add(enemy)
 
     def setup(self):
         self.all_enemies = pygame.sprite.Group()
         self.all_sprites = pygame.sprite.Group()
 
-        self.character = Character(color=(255, 0, 0), width=40, height=40)
+        self.character = Character(source=(255, 0, 0), width=40, height=40)
         self.stats = GameStats(game=self)
-        for offset in range(0,-11,-1):
-            enemy = Enemy(width=200, pos=(offset*100-100, 275))
-            self.all_enemies.add(enemy)
+        [self.create_wave(offset=10000*i) for i in range(4)]
+        # for offset in range(0,-11,-1):
+        #     enemy = Enemy(source='assets/sprites/golem')
+        #     self.all_enemies.add(enemy)
         self.all_sprites.add(self.character)
         self.all_sprites.add(self.stats)
         self.all_sprites.add(self.all_enemies)
@@ -287,12 +340,22 @@ class Game:
             #         fire = Effect(width=80, height=80, follow=enemy, source='assets/effects/fire')
             #         self.all_sprites.add(fire)
 
-            
-            self.time = time.time() - self.time0
+            while self.pause:
+                for event in pygame.event.get():
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_p:
+                            # unpause
+                            self.pause = not self.pause
+                            time_offset = time.time() - time_paused
+                            self.time0 += time_offset
+                            
+            self.time = time.time() - self.time0            
             for event in pygame.event.get():  # Retrieve all pending events
-                if event.type == pygame.QUIT:
-                    run = False
+                if event.type == 42000 and hasattr(event, 'func'):
+                    event.func()
                 if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        run = False
                     if event.key == pygame.K_LEFT:
                         self.move(-10, 0)
                     if event.key == pygame.K_RIGHT:
@@ -305,6 +368,9 @@ class Game:
                         self.money += 100
                     if event.key == pygame.K_h:
                         self.health += 1 if self.health < 30 else 0
+                    if event.key == pygame.K_p:
+                        time_paused = time.time()
+                        self.pause = not self.pause
                     if event.key == pygame.K_r and pygame.K_LCTRL:
                         self.cleanup()
                         # game = Game()
