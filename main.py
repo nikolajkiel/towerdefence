@@ -15,7 +15,7 @@ def get_path():
         yield point
 
 
-class General(pygame.sprite.Sprite):
+class General(pygame.sprite.DirtySprite):
     def __init__(self, *args, source=None, parent=None, width=80, height=80, pos=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.source = Path(source) if source is not None else None
@@ -37,7 +37,9 @@ class General(pygame.sprite.Sprite):
 
     @property
     def frame_path(self):
-        return [png for png in self.source.rglob('*_[0-9][0-9].png')]
+        if self.source:
+            frame_path = self.source.rglob('*_[0-9][0-9].png')
+            return sorted(frame_path)
     
     @property
     def fps(self):
@@ -48,14 +50,6 @@ class General(pygame.sprite.Sprite):
     def distance(self, other):
         return ((self.rect.center[0]-other[0])**2 + (self.rect.center[1]-other[1])**2)**0.5
 
-    @property
-    def pps(self):
-        '''pixels per second'''
-        if self.Pt:
-            time = self.Dt[-1]-self.Dt[0]
-            return int(self.distance(self.Pt[0])/time if time != 0 else 0)
-
-    
     @lru_cache
     def get_image_n(self, n):
         image = pygame.image.load(self.frame_path[n])
@@ -64,7 +58,6 @@ class General(pygame.sprite.Sprite):
         width, height = image.get_width(), image.get_height()
         self.scale = min(self.width/width, self.height/height) if self.scale is None else self.scale
         img = pygame.transform.scale(image, (image.get_width()*self.scale, image.get_height()*self.scale))
-        self.parent.blit_rects[-1].append(img.get_rect()) if self.parent is not None else None
         return img
 
     @property
@@ -100,7 +93,8 @@ class GameStats(General):
 
     @lru_cache
     def get_image_n(self, n):
-        return pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        image = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        return image
 
     @cached_property
     def pngs(self):
@@ -128,10 +122,13 @@ class GameStats(General):
         return pygame.font.Font(None, int(self.FONTSIZE*1.5))
 
     def update(self, *args, **kwargs):
-        # super().update(*args, **kwargs)
+        self.dirty = 1
+        super().update(*args, **kwargs)
         self.image.fill((0,0,0,0))
+        self.parent.blit_rects[-1].append(self.rect)
         stats = [self.Font.render(f"Money: {game.money}", True, (219, 172, 52))] + \
-            [self.font.render(f"Time: {game.time:.2f}", True, (255, 255, 255))]
+            [self.font.render(f"Time: {game.time:.2f}", True, (255, 255, 255))] + \
+            [self.font.render(f"FPS: {game.fps}/{game.FPS}", True, (255, 255, 255))]
         texts = stats + [self.font.render(f"{log}", True, (255, 255, 255)) for log in self.log]
 
         for i, text in enumerate(texts):
@@ -140,20 +137,19 @@ class GameStats(General):
             text_rect.y += self.FONTSIZE * i
             self.image.blit(text, text_rect)
         self.life
-        # self.image.blit(self.health, (0, 0))
 
 
 class Character(General):
-    def __init__(self,*args, route=get_path, speed=2, **kwargs):
+    def __init__(self,*args, route=get_path, speed=45, **kwargs):
         if 'pos' in kwargs:
             self.pos = kwargs.pop('pos')
         super().__init__(*args, **kwargs)
         if hasattr(self, 'pos'):
             self.rect.x, self.rect.y = self.pos
         self.speed = speed
+        self.move_offset = [0, 0]
         self.route = route()
         
-        # self.rect = self.image.get_rect()
         self.destination = next(self.route)
 
     def move(self, dx, dy):
@@ -161,6 +157,7 @@ class Character(General):
         self.rect.y += dy
 
     def navigate(self, debug=[]):
+        self.dirty = 1
         if not debug:
             debug.append(id(self))
         if id(self) in debug:
@@ -168,7 +165,10 @@ class Character(General):
             # print(self.rect.x, self.rect.y, self.rect.center)
         direction_vector = np.array(self.destination) - np.array(self.rect.center)
         vector_length = (direction_vector[0]**2 + direction_vector[1]**2) ** 0.5
-        norm = direction_vector / vector_length
+        if vector_length == 0:
+            norm = [0, 0]
+        else:
+            norm = direction_vector / vector_length
         if vector_length <= self.speed:
             try:
                 self.destination = next(self.route)
@@ -176,12 +176,16 @@ class Character(General):
                 self.kill()
                 game.stats.log.append(f"enemy reached goal at {self.rect.center}")
                 if game.health > 0:
-                    game.health -= 10
+                    game.health -= 1
                 else:
                     game.stats.log.append(f"game over")
                 return
-        self.rect.x += int(self.speed * norm[0])
-        self.rect.y += int(self.speed * norm[1])
+        move_x = self.speed/self.fps * norm[0] + self.move_offset[0]
+        self.move_offset[0] = move_x - int(move_x)
+        move_y = self.speed/self.fps * norm[1] + self.move_offset[1]
+        self.move_offset[1] = move_y - int(move_y)
+        self.rect.x += int(move_x)
+        self.rect.y += int(move_y)
 
 
 class Effect(Character):
@@ -195,53 +199,49 @@ class Effect(Character):
         self.follow = follow
         self.counter = 0
     
-    def update(self, *args: Any, **kwargs: Any) -> None:
-        super().update(*args, **kwargs)
-        if self.time > 19:
-            self.kill()
-            return
-        # cycle sprite images
-        # self.image = pygame.Surface
-        # n_frame = self.counter//min(self.fps, 20)%min(self.n_frames, max(1, int(self.time)))
-        n_frame = self.counter//4%min(self.n_frames, max(1, int(self.time)))
-        self.image = self.get_image_n(n_frame).convert_alpha() # pygame.image.load(f'{self.source}/{self.source.parts[-1]}_{n_frame:02d}.png').convert_alpha()
+    # def update(self, *args: Any, **kwargs: Any) -> None:
+    #     super().update(*args, **kwargs)
+    #     if self.time > 19:
+    #         self.kill()
+    #         return
+    #     # cycle sprite images
+    #     # self.image = pygame.Surface
+    #     # n_frame = self.counter//min(self.fps, 20)%min(self.n_frames, max(1, int(self.time)))
+    #     n_frame = self.counter//4%min(self.n_frames, max(1, int(self.time)))
+    #     self.image = self.get_image_n(n_frame).convert_alpha() # pygame.image.load(f'{self.source}/{self.source.parts[-1]}_{n_frame:02d}.png').convert_alpha()
 
-        self.rect.x = self.follow.rect.center[0]-self.image.get_width()/2
-        self.rect.y = self.follow.rect.center[1]-self.image.get_height()
+    #     self.rect.x = self.follow.rect.center[0]-self.image.get_width()/2
+    #     self.rect.y = self.follow.rect.center[1]-self.image.get_height()
         
     
 
 class Golem(Character):
-    WALK = [24, 25, 26, 27, 28, 29, 30, 31]
+    WALK = [24, 25, 26, 27, 28, 29, 30, 31, 15]
     source = Path('assets/sprites/golem')
 
     # animate sprite
     def update(self, *args: Any, **kwargs: Any) -> None:
         super().update(*args, **kwargs)
         # cycle sprite images
-        n_frame = max(1, self.fps)%len(self.WALK) + self.WALK[0]
-        # print(n_frame, self.pps, self.fps)
+        n_frame = self.WALK[self.counter//(max(1, self.parent.FPS//8))%len(self.WALK)]
         self.image = self.get_image_n(n_frame)
-        self.parent.blit_rects[-1].append(self.rect) if self.parent is not None else None
-        # self.image = pygame.image.load(f'{self.source}/{self.source.parts[-1]}_{n_frame:02d}.png').convert_alpha()
-        # width, height = self.image.get_width(), self.image.get_height()
-        # scale = self.width/width
-        # self.image = pygame.transform.scale(self.image, (self.image.get_width()*scale, self.image.get_height()*scale))
-        # if self.counter % 4 == 0:
+
         self.navigate()
 
 
 class Tower(General):
     PRICE = 50
     UPGRADE_PRICES = [50, 100]
-    TOWERS = {'brown': [(2,0,18)], 'grey': [(37,2,2,36)], 'red': [(52,40,40,40,24)]}
-    def __init__(self, *args, source='assets/Towers (brown)', pos=None, rank=0, **kwargs):
+    TOWERS = {'brown': [(2,0,18), (2, 41, 0, 43), (2, 41, 0, 41, 24)], 'grey': [(37,2,2,36)], 'red': [(52,40,40,40,24)]}
+    def __init__(self, *args, source='assets/Towers (brown)', pos=None, color='brown', rank=0, **kwargs):
         kwargs = kwargs | {"source": source}
         super().__init__(*args, **kwargs)
+        self.color = color
         self.rank = rank
         self.pos = pos
 
     def upgrade(self):
+        self.dirty = 1
         if self.rank >= len(self.UPGRADE_PRICES):
             game.stats.log.append(f"tower at {self.pos} is already max rank ({self.rank})")
             return
@@ -253,40 +253,30 @@ class Tower(General):
         self.get_image_n.cache_clear()
         self.update()
 
+    @lru_cache
     def stack_images(self, ns):
+        print(42, self._rect, dir(self._rect))
+        self.parent.blit_rects[-1].append(self.rect.inflate(2,2))
+
         imgs = []
         for n in ns:
-            path = self.frame_path[n]
-            img = pygame.image.load(path).convert_alpha()
+            img = self.get_image_n(n)
+            
             imgs.append(img)
             max_width = max([img.get_width() for img in imgs])
-            self.image = pygame.Surface((max_width, sum([img.get_height() for img in imgs])), pygame.SRCALPHA)
+        self.image = pygame.Surface((max_width, sum([img.get_height() for img in imgs])), pygame.SRCALPHA)
         y = self.image.get_height() - imgs[0].get_height()
         for img in imgs:
             self.image.blit(img, (0 + (max_width-img.get_width())/2, y))
-            y -= img.get_height()-42
+            y -= img.get_height() - 0
 
-        self.rect = self.image.get_rect()
+        self._rect = self.image.get_rect()
         self.rect.x = self.pos[0]-self.rect.width/2
         self.rect.y = self.pos[1]-self.rect.height+imgs[0].get_height()/2
 
-
-    @lru_cache
-    def get_n_images(self, n):
-        # key_of_rank = {i: k for i, k in enumerate(self.TOWERS)}
-        # self.stack_images(self.TOWERS[key_of_rank[self.rank]][n])
-        
-        image = pygame.image.load(self.frame_path[n])
-        if not 'level' in self.source.as_posix():  # FIXME
-            image = image.convert_alpha()
-        width, height = image.get_width(), image.get_height()
-        self.scale = min(self.width/width, self.height/height) if self.scale is None else self.scale
-        img = pygame.transform.scale(image, (image.get_width()*self.scale, image.get_height()*self.scale))
-        return img
-
-
     def update(self):
-        self.image = self.get_image_n(self.rank)
+        tower = self.TOWERS[self.color][self.rank]
+        self.stack_images(tower)
 
 class Schedule:
     type = 42000
@@ -304,7 +294,9 @@ class Schedule:
 
     @property
     def is_ready(self):
-        return (time.time() - self.start_time)*1000 > self.delay
+        ready = (time.time() - self.start_time)*1000 > self.delay
+        # print(ready)
+        return ready
 
     def __call__(self):
         if self.is_ready:
@@ -316,36 +308,37 @@ class Schedule:
 
 
 class Game(General):
-    def __init__(self, money=200, width=1800, height=600, level=0, *args, **kwargs):
+    def __init__(self, money=200, width=1800, height=600, level=0, fps=180, *args, **kwargs):
         kwargs = kwargs | {"width": width, "height": height}
         super().__init__(*args, **kwargs)
         self.level = level
         self.screen = pygame.display.set_mode((self.width, self.height))
         self.money = money
         self.health = 30
-        self.setup()
+        self.FPS = fps
         self.time0 = time.time()
         self.time = time.time()
+        self.clock = pygame.time.Clock()
         self.pause = False
-        self.blit_rects = deque(maxlen=2)
-        self.blit_rects.append([])
-        self.blit_rects.append([])
+        self.blit_rects = deque(maxlen=2) # store dirty rects from current and previous frame for clearing
+        [self.blit_rects.append([]) for _ in range(self.blit_rects.maxlen)]
+        self.setup()
 
-    def create_wave(self, n_enemies=12, offset=0):
+    def create_wave(self, n_enemies=41, offset=0):
         '''spawn enemies with a delay'''
         for i in range(n_enemies):
-            s = Schedule(Golem, delay=i*500 + offset, parent=self, source='assets/sprites/golem')
+            s = Schedule(Golem, delay=i*1200 + offset, parent=self, source='assets/sprites/golem')
             e = pygame.event.Event(42000, func=s)
             pygame.event.post(e)
 
     def setup(self):
         # self.image = self.get_image_n(self.level)
-        self.all_enemies = pygame.sprite.Group()
-        self.all_sprites = pygame.sprite.Group()
+        self.all_enemies = pygame.sprite.LayeredDirty() # pygame.sprite.Group()
+        self.all_sprites = pygame.sprite.LayeredDirty() # pygame.sprite.Group()
 
         self.character = Character(source='assets/effects/fire', width=40, height=40)
         self.stats = GameStats(parent=self)
-        [self.create_wave(offset=10000*i) for i in range(4)]
+        [self.create_wave(offset=15000*i) for i in range(4)]
         # for offset in range(0,-11,-1):
         #     enemy = Enemy(source='assets/sprites/golem')
         #     self.all_enemies.add(enemy)
@@ -376,7 +369,7 @@ class Game(General):
             self.stats.log.append(f"not enough money to spawn tower at {pos}")
             return
         self.money -= Tower.PRICE
-        tower = Tower(pos=pos)
+        tower = Tower(pos=pos, parent=self)
         self.all_sprites.add(tower)
         self.stats.log.append(f"tower spawned at {pos}")
 
@@ -388,28 +381,21 @@ class Game(General):
                 break
 
     def update(self, *args: Any, **kwargs: Any) -> None:
+        self.all_sprites.clear(self.background, self.get_image_n(self.level))
         super().update(*args, **kwargs)
+        # sort all sprites by y position
+        # self.all_sprites = pygame.sprite.LayeredUpdates(sorted(self.all_sprites.sprites(), key=lambda sprite: sprite.rect.y+sprite.rect.height))
         
-        
-        
-        if len(self.all_sprites) > 5:
-            self.background
-        else:
-
-            # self.screen.blit(self.get_image_n(self.level), (0, 0), self.image.get_rect())
-            for dirty_rect in self.blit_rects[-2]:
-                dirty_rect = dirty_rect.inflate(5,5)
-                self.screen.blit(self.get_image_n(self.level), dirty_rect, dirty_rect)
-            self.blit_rects.append([])
+        self.all_sprites.update()
 
     @property
     def background(self):
         # Load and blit the background image
-        self.screen.blit(self.get_image_n(self.level), (0, 0))
-        # show points on path
+        bgd = self.get_image_n(self.level)
         for point in get_path():
-            pygame.draw.circle(self.screen, (255, 0, 0), point, 5)
-
+            pygame.draw.circle(bgd, (255, 0, 0), point, 5)
+        
+        return bgd
 
     def cleanup(self):
         self.all_sprites.empty()
@@ -434,12 +420,12 @@ class Game(General):
                             time_offset = time.time() - time_paused
                             self.time0 += time_offset
                             
-            self.time = time.time() - self.time0            
+            self.time = time.time() - self.time0
             for event in pygame.event.get():  # Retrieve all pending events
                 if event.type == 42000 and hasattr(event, 'func'):
                     event.func()
                 if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
+                    if event.key == pygame.K_ESCAPE or event.type == pygame.QUIT:
                         run = False
                     if event.key == pygame.K_LEFT:
                         self.move(-10, 0)
@@ -467,19 +453,13 @@ class Game(General):
             
             
             
-            # self.screen.blit(self.get_image_n(self.level), (0, 0))
-            # self.background
-            # self.screen.blit(pygame.image.load(f'assets/level/level_{self.level:02d}.png'), (0, 0))
-            
-            
-            
-            # self.background  # Draw the background in each frame
             self.update()
-            self.all_sprites.update()
-            # sort all sprites by y position
-            self.all_sprites = pygame.sprite.LayeredUpdates(sorted(self.all_sprites.sprites(), key=lambda sprite: sprite.rect.y+sprite.rect.height))
-            self.all_sprites.draw(self.screen)
-            pygame.display.flip()
+            # self.all_sprites = pygame.sprite.LayeredUpdates(sorted(self.all_sprites.sprites(), key=lambda sprite: sprite.rect.y+sprite.rect.height))
+            self.clock.tick(self.FPS)
+
+            rects = self.all_sprites.draw(self.screen)
+            pygame.display.update(rects)
+            # pygame.display.flip()
 
         pygame.quit()
 
@@ -488,8 +468,10 @@ if __name__ == "__main__":
     pygame.init()
     game = Game(source='assets/level', level=0)
 
-    import cProfile as profile
-    with profile.Profile() as pr:
-        game.run()
-        pr.dump_stats('main.prof')
-        # gprof2dot -f pstats main.pstats | dot -Tsvg -o main.svg
+    game.run()
+
+    # import cProfile as profile
+    # with profile.Profile() as pr:
+    #     game.run()
+    #     pr.dump_stats('main.prof')
+    #     # gprof2dot -f pstats main.pstats | dot -Tsvg -o main.svg
