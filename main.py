@@ -187,6 +187,9 @@ class Character(General):
         self.rect.x += int(move_x)
         self.rect.y += int(move_y)
 
+    def put_on_fire(self):
+        fire = Effect(width=80, height=80, follow=self, source='assets/effects/fire')
+
 
 class Effect(Character):
     '''
@@ -197,7 +200,13 @@ class Effect(Character):
         kwargs = kwargs | {"source": source}
         super().__init__(*args, **kwargs)
         self.follow = follow
+        game.all_sprites.add(self)
         self.counter = 0
+
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self._rect.x = self.follow.rect.center[0]-self.image.get_width()/2
+        self._rect.y = self.follow.rect.center[1]-self.image.get_height()
     
     # def update(self, *args: Any, **kwargs: Any) -> None:
     #     super().update(*args, **kwargs)
@@ -324,7 +333,7 @@ class Game(General):
         [self.blit_rects.append([]) for _ in range(self.blit_rects.maxlen)]
         self.setup()
 
-    def create_wave(self, n_enemies=41, offset=0):
+    def create_wave(self, n_enemies=2, offset=0):
         '''spawn enemies with a delay'''
         for i in range(n_enemies):
             s = Schedule(Golem, delay=i*1200 + offset, parent=self, source='assets/sprites/golem')
@@ -371,6 +380,7 @@ class Game(General):
         self.money -= Tower.PRICE
         tower = Tower(pos=pos, parent=self)
         self.all_sprites.add(tower)
+        self.all_enemies.sprites()[0].put_on_fire()
         self.stats.log.append(f"tower spawned at {pos}")
 
     def mouse_hover(self, event):
