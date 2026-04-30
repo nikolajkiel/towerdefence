@@ -5,6 +5,19 @@ from functools import cached_property, lru_cache
 import numpy as np
 from pathlib import Path
 import time
+from PIL import Image
+
+
+def load_image_compat(path: str | Path) -> pygame.Surface:
+    """Load images even when pygame lacks SDL_image extended format support."""
+    image_path = Path(path)
+    try:
+        return pygame.image.load(image_path.as_posix())
+    except pygame.error:
+        # Fallback for environments where pygame can only load BMP natively.
+        with Image.open(image_path) as pil_img:
+            rgba_img = pil_img.convert("RGBA")
+            return pygame.image.fromstring(rgba_img.tobytes(), rgba_img.size, "RGBA")
 
 def get_path():
     '''
@@ -18,7 +31,7 @@ def get_path():
 class General(pygame.sprite.DirtySprite):
     def __init__(self, *args, source=None, parent=None, width=80, height=80, pos=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.source = Path(source) if source is not None else None
+        self.source = Path(source) if source else getattr(self, "source", None)
         self.parent = parent
         self.width = width
         self.height = height
@@ -45,14 +58,17 @@ class General(pygame.sprite.DirtySprite):
     def fps(self):
         if self.Dt:
             denominator = (self.time-self.Dt[0])
-            return int(len(self.Dt)/(self.time-self.Dt[0])) if denominator != 0 else 1
+            if denominator == 0:
+                return 1
+            else:
+                return max(1, int(len(self.Dt) / (self.time - self.Dt[0])))
     
     def distance(self, other):
         return ((self.rect.center[0]-other[0])**2 + (self.rect.center[1]-other[1])**2)**0.5
 
     @lru_cache
     def get_image_n(self, n):
-        image = pygame.image.load(self.frame_path[n])
+        image = load_image_compat(self.frame_path[n])
         if not 'level' in self.source.as_posix():  # FIXME
             image = image.convert_alpha()
         width, height = image.get_width(), image.get_height()
@@ -98,7 +114,7 @@ class GameStats(General):
 
     @cached_property
     def pngs(self):
-        return [pygame.image.load(f'assets/effects/heart/heart_{n:02d}.png') for n in range(4)]
+        return [load_image_compat(f"assets/effects/heart/heart_{n:02d}.png") for n in range(4)]
 
     @property
     def life(self):
@@ -140,7 +156,7 @@ class GameStats(General):
 
 
 class Character(General):
-    def __init__(self,*args, route=get_path, speed=45, **kwargs):
+    def __init__(self, *args, route=get_path, speed=45, left=True, **kwargs):
         if 'pos' in kwargs:
             self.pos = kwargs.pop('pos')
         super().__init__(*args, **kwargs)
@@ -149,6 +165,7 @@ class Character(General):
         self.speed = speed
         self.move_offset = [0, 0]
         self.route = route()
+        self.left = left
         
         self.destination = next(self.route)
 
@@ -163,7 +180,8 @@ class Character(General):
         if id(self) in debug:
             ...
             # print(self.rect.x, self.rect.y, self.rect.center)
-        direction_vector = np.array(self.destination) - np.array(self.rect.center)
+        left = -66 if self.left else 22
+        direction_vector = np.array(self.destination) - np.array([self.rect.center[0], self.rect.bottom + left])
         vector_length = (direction_vector[0]**2 + direction_vector[1]**2) ** 0.5
         if vector_length == 0:
             norm = [0, 0]
@@ -237,6 +255,10 @@ class Golem(Character):
 
         self.navigate()
 
+class Viking(Golem):
+    WALK = [0, 1, 2, 3, 4, 5, 6, 7]
+    source = Path("assets/sprites/viking")
+
 
 class Tower(General):
     PRICE = 50
@@ -275,9 +297,9 @@ class Tower(General):
             max_width = max([img.get_width() for img in imgs])
         self.image = pygame.Surface((max_width, sum([img.get_height() for img in imgs])), pygame.SRCALPHA)
         y = self.image.get_height() - imgs[0].get_height()
-        for img in imgs:
-            self.image.blit(img, (0 + (max_width-img.get_width())/2, y))
-            y -= img.get_height() - 0
+        for i, img in enumerate(imgs):
+            self.image.blit(img, (0 + (max_width - img.get_width()) / 2, y))
+            y -= img.get_height() - 43
 
         self._rect = self.image.get_rect()
         self.rect.x = self.pos[0]-self.rect.width/2
@@ -333,10 +355,10 @@ class Game(General):
         [self.blit_rects.append([]) for _ in range(self.blit_rects.maxlen)]
         self.setup()
 
-    def create_wave(self, n_enemies=2, offset=0):
+    def create_wave(self, n_enemies=22, offset=0):
         '''spawn enemies with a delay'''
         for i in range(n_enemies):
-            s = Schedule(Golem, delay=i*1200 + offset, parent=self, source='assets/sprites/golem')
+            s = Schedule(Viking, delay=i * 1200 + offset, left=bool(i % 2), parent=self)
             e = pygame.event.Event(42000, func=s)
             pygame.event.post(e)
 
@@ -384,10 +406,11 @@ class Game(General):
         self.stats.log.append(f"tower spawned at {pos}")
 
     def mouse_hover(self, event):
-        return
         for tower in self.all_sprites:
             if isinstance(tower, Tower) and tower.rect.collidepoint(event.pos):
-                self.screen.blit(pygame.image.load('assets/range.png'), (tower.pos[0]-tower.rect.width/2, tower.pos[1]-tower.rect.height/2))
+                self.screen.blit(
+                    load_image_compat("assets/range.png"), (tower.pos[0] - tower.rect.width / 2, tower.pos[1] - tower.rect.height / 2)
+                )
                 break
 
     def update(self, *args: Any, **kwargs: Any) -> None:
@@ -476,6 +499,7 @@ class Game(General):
 
 if __name__ == "__main__":
     pygame.init()
+    pygame.font.init()
     game = Game(source='assets/level', level=0)
 
     game.run()
